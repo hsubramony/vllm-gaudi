@@ -231,7 +231,8 @@ async def _handle_completions(api: str, request: Request):
         # Get the next decode client in round-robin fashion
         decode_client_info = get_next_client(request.app, 'decode')
 
-        logger.debug("Using %s %s", prefill_client_info, decode_client_info)
+        #logger.debug("Using %s %s", prefill_client_info, decode_client_info)
+        print("Using %s %s", prefill_client_info, decode_client_info)
 
         # Stream response from decode service
         async def generate_stream():

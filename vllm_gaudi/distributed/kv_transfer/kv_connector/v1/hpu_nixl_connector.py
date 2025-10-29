@@ -141,6 +141,7 @@ def wait_for_save(self):
     if self.connector_worker.use_host_buffer and \
        self.connector_worker.copy_blocks:
         self.connector_worker.save_kv_to_host(self._connector_metadata)
+        logger.info(f"libin debug wait_for_save {os.getenv('RANK')}, takes {time.perf_counter() - s1}")
 
 NixlConnector.wait_for_save = wait_for_save
 
@@ -855,11 +856,11 @@ def start_load_kv(self, metadata: NixlConnectorMetadata):
     We check for these trnxs to complete in each step().
     """
     s1 = time.perf_counter()
-    #logger.info(f'libin debug start_load_kv, {os.getenv('RANK')}')
+    logger.info(f'libin debug start_load_kv, {os.getenv('RANK')}')
     for req_id, meta in metadata.reqs_to_recv.items():
         if req_id not in self.req_recv_time.keys():
             self.req_recv_time[req_id] = time.perf_counter()
-            # logger.info(f"libin debug start_load_kv starts {os.getenv('RANK')} for {req_id=}")
+            logger.info(f"libin debug start_load_kv starts {os.getenv('RANK')} for {req_id=}")
         remote_engine_id = meta.remote_engine_id
         logger.debug(
             "start_load_kv for request %s from remote engine %s. "
@@ -873,21 +874,21 @@ def start_load_kv(self, metadata: NixlConnectorMetadata):
             with self._handshake_lock:
                 if remote_engine_id not in self._remote_agents:
                     s2 = time.perf_counter()
-                    # logger.info(f"libin debug start_load_kv  {os.getenv('RANK')}, start handleshake before {s2 - s1} {req_id=}")
+                    logger.info(f"libin debug start_load_kv  {os.getenv('RANK')}, start handleshake before {s2 - s1} {req_id=}")
                     self._background_nixl_handshake(
                         req_id, remote_engine_id, meta)
                     continue
         s3 = time.perf_counter()
-        #logger.info(f'libin debug _read_blocks_for_req start {os.getenv('RANK')}, {req_id=} handshake time {s3-self.req_recv_time[req_id]}')
+        logger.info(f'libin debug _read_blocks_for_req start {os.getenv('RANK')}, {req_id=} handshake time {s3-self.req_recv_time[req_id]}')
         # Handshake already completed, start async read xfer.
         self._read_blocks_for_req(req_id, meta)
-        #logger.info(f'libin debug _read_blocks_for_req end {os.getenv('RANK')}, {req_id=} async transfer {time.perf_counter() - s3}')
+        logger.info(f'libin debug _read_blocks_for_req end {os.getenv('RANK')}, {req_id=} async transfer {time.perf_counter() - s3}')
     # Start transfers for requests whose handshakes have now finished.
     while not self._ready_requests.empty():
         s4 = time.perf_counter()
-        #logger.info(f'libin debug _read_blocks_for_req1 start {os.getenv('RANK')}')
+        logger.info(f'libin debug _read_blocks_for_req1 start {os.getenv('RANK')}')
         self._read_blocks_for_req(*self._ready_requests.get_nowait())
-        #logger.info(f'libin debug _read_blocks_for_req1 end {os.getenv('RANK')} async transfer: {time.perf_counter() - s4}')
+        logger.info(f'libin debug _read_blocks_for_req1 end {os.getenv('RANK')} async transfer: {time.perf_counter() - s4}')
     # Add to requests that are waiting to be read and track expiration.
     self._reqs_to_send.update(metadata.reqs_to_send)
 

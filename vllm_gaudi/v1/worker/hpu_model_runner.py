@@ -2742,6 +2742,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # Transfer [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] to CPU
         # On CPU, sanitize [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] -> [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2] # noqa
         # Return [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2]
+        s1 = time.perf_counter()
         self.run_defragmenter(scheduler_output, warmup_mode)
 
         batch_changed = self._update_states(scheduler_output)
@@ -2814,6 +2815,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         if self.use_async_scheduling:
             invalid_req_indices = []
+
+        token_ids_s = None
         ######################### PREFILLS #########################
         if num_prefills > 0:
             htorch.core.mark_step()
@@ -2861,6 +2864,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                         prefill_start_idx = num_decodes
                         invalid_req_indices.append(num_decodes + idx)
                 htorch.core.mark_step()
+                token_ids_s = token_ids.shape
                 non_flattened_hidden_states, aux_hidden_states, \
                     sample_hidden_states, logits_device = \
                     self._execute_model_generic(
@@ -2925,6 +2929,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         ######################### DECODES #########################
         # Decodes run as one single batch with [padded_decode_bs, 1]
         if num_decodes > 0:
+            token_ids_s = decode_data.token_ids.shape
             assert decode_data is not None
             lora_mask, lora_logits_mask = self._configure_lora(decode_data.token_ids, self.requests,
                                                                pd_info.decode_req_ids, False)
@@ -3169,6 +3174,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             ))
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
+        s2= time.perf_counter()
+        if token_ids_s and num_prefills > 0:
+            logger.info(f"libin debug execute_model prompt {os.getenv('RANK')} {token_ids_s=} step time:{s2-s1}")
 
         return model_runner_output
 
