@@ -1424,10 +1424,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         target_bs, target_len = bucketing
         if target_bs == 1 and bs > 1:
             data = [list(itertools.chain(*data))]
-         data = [pad_list(x, target_len, padding_gen) for x in data]
-         padding = itertools.islice(padding_gen, target_len)
-         data = pad_list(data, target_bs, itertools.tee(padding, target_bs - len(data)))
-         return data
+        data = [pad_list(x, target_len, padding_gen) for x in data]
+        padding = itertools.islice(padding_gen, target_len)
+        data = pad_list(data, target_bs, itertools.tee(padding, target_bs - len(data)))
+        return data
 
     def _align_and_pad_mrope_positions(self, req_ids: list[str], context_lens: list[int], query_lens: list[int],
                                        bucketing: tuple[int, int], padding_gen: int) -> torch.Tensor:
