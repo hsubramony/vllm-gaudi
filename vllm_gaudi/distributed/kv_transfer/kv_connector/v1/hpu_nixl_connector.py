@@ -759,8 +759,8 @@ def _read_blocks(self, local_block_ids: list[int],
     # workers will issue xfers to parts of the P worker remote kv caches.
 
     # Get descs ids.
-    local_block_descs_ids: list[int] = []
-    remote_block_descs_ids: list[int] = []
+    local_block_descs_ids: np.ndarray
+    remote_block_descs_ids: np.ndarray
 
     if self.block_factor > 1:
         local_sub_block_ids = [b for x in local_block_ids for b in range(x * self.block_factor, (x + 1) * self.block_factor)]
@@ -786,6 +786,8 @@ def _read_blocks(self, local_block_ids: list[int],
     else:
         # TODO(mgoin): remove this once we have hybrid memory allocator
         # Optimization for models with local attention (Llama 4)
+        local_descs_list = []
+        remote_descs_list = []
         for layer_idx, block_window in enumerate(
                 self.block_window_per_layer):
             # For each layer:
@@ -804,7 +806,11 @@ def _read_blocks(self, local_block_ids: list[int],
                 self.engine_id, layer_local_block_ids, layer_idx)
             layer_remote_desc_ids = self._get_block_descs_ids(
                 dst_engine_id, layer_remote_block_ids, layer_idx)
+            local_descs_list.append(layer_local_desc_ids)
+            remote_descs_list.append(layer_remote_desc_ids)
 
+            local_block_descs_ids = np.concatenate(local_descs_list)
+            remote_block_descs_ids = np.concatenate(remote_descs_list)
             local_block_descs_ids.extend(layer_local_desc_ids)
             remote_block_descs_ids.extend(layer_remote_desc_ids)
 
@@ -831,7 +837,7 @@ def _read_blocks(self, local_block_ids: list[int],
 
 
 NixlConnectorWorker._read_blocks = _read_blocks
-
+'''
 def _get_block_descs_ids(self,
                          engine_id: str,
                          block_ids: list[int],
@@ -866,7 +872,7 @@ def _get_block_descs_ids(self,
     return descs_ids
 
 NixlConnectorWorker._get_block_descs_ids = _get_block_descs_ids
-
+'''
 def start_load_kv(self, metadata: NixlConnectorMetadata):
     """
     Start loading by triggering non-blocking nixl_xfer.
