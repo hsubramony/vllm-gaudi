@@ -49,7 +49,6 @@ class HpuPlatform(Platform):
             logger.info("Using HPUAttentionV1 backend.")
             return ("vllm_gaudi.v1.attention.backends."
                     "hpu_attn.HPUAttentionBackendV1")
-
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         return True
@@ -101,7 +100,6 @@ class HpuPlatform(Platform):
             # Activate custom ops for v1.
             compilation_config.custom_ops = ["all"]
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            compilation_config.cudagraph_capture_sizes = []
 
             if compilation_config.level != CompilationLevel.NO_COMPILATION:
                 logger.info("[HPU] Forcing CompilationLevel.NO_COMPILATION "
