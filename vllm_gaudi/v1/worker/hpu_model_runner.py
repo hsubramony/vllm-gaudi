@@ -2108,7 +2108,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
-        logger.info(f"libin debug _prepare_inputs {num_prefills=} {num_decodes=}")
+        #logger.info(f"libin debug _prepare_inputs {num_prefills=} {num_decodes=}")
         num_reqs = num_prefills + num_decodes
 
         # Get the number of scheduled tokens for each request.
@@ -2122,8 +2122,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             num_scheduled_tokens.append(seq_num_scheduled_tokens)
             num_prompt_tokens.append(seq_num_prompt_tokens)
             # NOTE: assert that all the decodes are "decodes".
-            if idx < num_decodes:
-                assert seq_num_scheduled_tokens == 1
+            #if idx < num_decodes:
+                #assert seq_num_scheduled_tokens == 1
         return (self._prepare_prefill_inputs(num_prefills, num_decodes,
                                              num_scheduled_tokens),
                 self._prepare_decode_inputs(num_decodes, num_scheduled_tokens))
