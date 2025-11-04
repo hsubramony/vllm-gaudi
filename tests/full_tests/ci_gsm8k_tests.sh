@@ -91,7 +91,6 @@ if [ $? -ne 0 ]; then
 fi
 echo "Test with QWEN3-30B-A3B passed"
 
-<<<<<<< HEAD
 # QWEN3 compressed tensor + dynamic scaling
 run_qwen3_compressed_tensor_dynamic_scaling_test() {
     echo "➡️ Testing Qwen3-8B-FP8-dynamic + compressed-tensor + dynamic scaling..."
@@ -300,4 +299,3 @@ if [ $? -ne 0 ]; then
     exit -1
 fi
 echo "Test with multimodal-support with qwen2.5-vl-7b passed"
->>>>>>> parent of 0fbea55 (Enable Spec Decode for HPU v1 - Part1(basic workflow + eagle) (#81))
