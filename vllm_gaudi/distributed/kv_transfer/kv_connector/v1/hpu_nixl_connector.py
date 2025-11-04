@@ -811,8 +811,6 @@ def _read_blocks(self, local_block_ids: list[int],
 
             local_block_descs_ids = np.concatenate(local_descs_list)
             remote_block_descs_ids = np.concatenate(remote_descs_list)
-            local_block_descs_ids.extend(layer_local_desc_ids)
-            remote_block_descs_ids.extend(layer_remote_desc_ids)
 
     assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
@@ -837,42 +835,7 @@ def _read_blocks(self, local_block_ids: list[int],
 
 
 NixlConnectorWorker._read_blocks = _read_blocks
-'''
-def _get_block_descs_ids(self,
-                         engine_id: str,
-                         block_ids: list[int],
-                         layer_idx: Optional[int] = None) -> list[int]:
-    """
-    Get the descs ids for a set of block ids.
-    If layer_idx is provided, we use the region_ids for the given layer.
-    Otherwise, we use all regions.
-    """
-    if layer_idx is None:
-        region_ids = range(self.num_regions)
-    else:
-        assert layer_idx < self.num_layers
-        if self.num_layers < self.num_regions:
-            # If we have more regions than layers, we assume that
-            # the regions are organized as [K0, V0, K1, V1, ...]
-            # and we select K_i and V_i
-            assert 2 * self.num_layers == self.num_regions
-            region_ids = range(2 * layer_idx, 2 * layer_idx + 2)
-        else:
-            # Otherwise, we assume we have MLA and select i-th layer
-            assert self.num_layers == self.num_regions
-            region_ids = range(layer_idx, layer_idx + 1)
 
-    num_blocks = self.dst_num_blocks[engine_id]
-
-    # Compute the desc ids for each block.
-    descs_ids: list[int] = []
-    for reg_id in region_ids:
-        for block_id in block_ids:
-            descs_ids.append(reg_id * num_blocks + block_id)
-    return descs_ids
-
-NixlConnectorWorker._get_block_descs_ids = _get_block_descs_ids
-'''
 def start_load_kv(self, metadata: NixlConnectorMetadata):
     """
     Start loading by triggering non-blocking nixl_xfer.
