@@ -612,39 +612,29 @@ def get_finished(self) -> tuple[set[str], set[str]]:
             "and %s requests done recving", self.tp_rank,
             len(done_sending), len(done_recving))
     if self.is_hetero and self.kv_buffer_device == "hpu":
-        #import remote_pdb; remote_pdb.set_trace()
         t1 = time.perf_counter()
         remote_block_size = self.block_size // self.block_factor
         block_size, n_kv_heads, head_dim = self.block_shape
         for req_id in done_recving:
             logger.info(f"done_recving in get_finished for {req_id=} at {time.perf_counter()=}")
             meta = self._recving_metadata.pop(req_id)
-
             local_block_ids = meta.local_block_ids
             slot_indices = torch.tensor(np.concatenate([  
                 np.arange(start=block_idx * self.block_size,  stop=(block_idx + 1) * self.block_size) \
                 for block_idx in local_block_ids  
             ]), device=self.kv_buffer_device, dtype=torch.int64)
-            
-            for k, v in self.device_kv_caches.values():  
-                # Process all blocks in one operation  
-                k_blocks = k.index_select(0, slot_indices)  
+            for k, v in self.device_kv_caches.values():
+                k_blocks = k.index_select(0, slot_indices)
                 k_reshaped = k_blocks.reshape(  
-                    len(local_block_ids), self.block_size, n_kv_heads, head_dim  
-                ).reshape(  
                     len(local_block_ids) * self.block_factor, n_kv_heads, remote_block_size, head_dim  
-                ).permute(0, 2, 1, 3).contiguous().reshape(-1, n_kv_heads, head_dim)  
+                ).permute(0, 2, 1, 3).contiguous().reshape(-1, n_kv_heads, head_dim)
                 k.index_put_((slot_indices,), k_reshaped)  
-                
                 # Same for v  
                 v_blocks = v.index_select(0, slot_indices)  
                 v_reshaped = v_blocks.reshape(  
-                    len(local_block_ids), self.block_size, n_kv_heads, head_dim  
-                ).reshape(  
                     len(local_block_ids) * self.block_factor, n_kv_heads, remote_block_size, head_dim  
                 ).permute(0, 2, 1, 3).contiguous().reshape(-1, n_kv_heads, head_dim)  
                 v.index_put_((slot_indices,), v_reshaped)
-            #import remote_pdb; remote_pdb.set_trace()
             t2 = time.perf_counter()
             tt = t2-t1
             logger.debug(f'buke permute time:{tt}, {req_id=}|{self._recving_metadata=}')
