@@ -630,8 +630,6 @@ def get_finished(self) -> tuple[set[str], set[str]]:
                 # Process all blocks in one operation  
                 k_blocks = k.index_select(0, slot_indices)  
                 k_reshaped = k_blocks.reshape(  
-                    len(local_block_ids), self.block_size, n_kv_heads, head_dim  
-                ).reshape(  
                     len(local_block_ids) * self.block_factor, n_kv_heads, remote_block_size, head_dim  
                 ).permute(0, 2, 1, 3).contiguous().reshape(-1, n_kv_heads, head_dim)  
                 k.index_put_((slot_indices,), k_reshaped)  
@@ -639,8 +637,6 @@ def get_finished(self) -> tuple[set[str], set[str]]:
                 # Same for v  
                 v_blocks = v.index_select(0, slot_indices)  
                 v_reshaped = v_blocks.reshape(  
-                    len(local_block_ids), self.block_size, n_kv_heads, head_dim  
-                ).reshape(  
                     len(local_block_ids) * self.block_factor, n_kv_heads, remote_block_size, head_dim  
                 ).permute(0, 2, 1, 3).contiguous().reshape(-1, n_kv_heads, head_dim)  
                 v.index_put_((slot_indices,), v_reshaped)
