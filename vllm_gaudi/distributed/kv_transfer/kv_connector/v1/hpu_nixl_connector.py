@@ -718,16 +718,17 @@ NixlConnectorWorker.rewrite_kv_based_on_transfer_layout = rewrite_kv_based_on_tr
 def rewrite_kv_based_on_transfer_layout_hetero(self, metadata: NixlConnectorMetadata):
     s = time.perf_counter()
     for req_id, meta in metadata.reqs_to_save.items():
-        local_block_ids = meta.local_block_ids
-        slot_indices = torch.tensor(np.concatenate([
-                np.arange(start=block_idx * self.block_size,  stop=(block_idx + 1) * self.block_size) \
-                for block_idx in local_block_ids
-            ]), device=self.kv_buffer_device, dtype=torch.int64)
+        local_block_ids = meta.local_block_ids        
+        local_block_ids = np.array(meta.local_block_ids)
+        start_indices = local_block_ids * self.block_size
+        slot_indices_np = (start_indices[:, None] + np.arange(self.block_size)).reshape(-1)
+        slot_indices = torch.from_numpy(slot_indices_np).to(self.kv_buffer_device)
+        _, n_kv_heads, head_dim = self.block_shape
+
         for k, v in self.device_kv_caches.values():
-            _, n_kv_heads, head_dim = self.block_shape
-            k[slot_indices] = k[slot_indices].reshape(-1, self.block_size//self.block_factor, n_kv_heads, head_dim).permute(0, 2, 1, 3).contiguous().view(-1, n_kv_heads, head_dim)
-            # Same for v  
-            v[slot_indices] = v[slot_indices].reshape(-1, self.block_size//self.block_factor, n_kv_heads, head_dim).permute(0, 2, 1, 3).contiguous().view(-1, n_kv_heads, head_dim)
+            new_shape = (-1, self.block_size // self.block_factor, n_kv_heads, head_dim)
+            k[slot_indices] = torch.index_select(k, 0, slot_indices).reshape(*new_shape).permute(0, 2, 1, 3).contiguous().view(-1, n_kv_heads, head_dim)
+            v[slot_indices] = torch.index_select(v, 0, slot_indices).reshape(*new_shape).permute(0, 2, 1, 3).contiguous().view(-1, n_kv_heads, head_dim)
     if len(metadata.reqs_to_save) > 0:
         torch.hpu.synchronize()
     logger.debug('buke time consumes in rewrite:', time.perf_counter()-s)
