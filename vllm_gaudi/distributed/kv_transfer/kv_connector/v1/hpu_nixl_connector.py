@@ -305,10 +305,10 @@ def request_finished(
     
     if self.is_hetero2:
         computed_block_ids = [i for x in computed_block_ids for i in range(x * self.block_factor, (x + 1) * self.block_factor)]
-        logger.debug('buke: ', computed_block_ids)
+        logger.debug(f'buke in request_finished: {computed_block_ids=}')
         remote_block_ids_num = math.ceil(request.num_prompt_tokens / (self.block_size // self.block_factor))
         computed_block_ids = computed_block_ids[:remote_block_ids_num]
-        logger.debug('buke computed_block_ids to: ', remote_block_ids_num, computed_block_ids)
+        logger.debug(f'buke computed_block_ids to: {remote_block_ids_num=}, {computed_block_ids=}')
     return delay_free_blocks, dict(
         do_remote_prefill=True,
         do_remote_decode=False,
@@ -737,7 +737,7 @@ def rewrite_kv_based_on_transfer_layout_hetero(self, metadata: NixlConnectorMeta
         
     if len(metadata.reqs_to_save) > 0:
         torch.hpu.synchronize()
-    logger.debug('buke time consumes in rewrite:', time.perf_counter()-s)
+    logger.debug(f'buke time consumes in rewrite: {time.perf_counter()-s=}')
 NixlConnectorWorker.rewrite_kv_based_on_transfer_layout_hetero = rewrite_kv_based_on_transfer_layout_hetero
 
 
@@ -1102,10 +1102,14 @@ def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         engine_id=self.engine_id,
         agent_metadata=self.nixl_wrapper.get_agent_metadata(),
         kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
+        device_id = 0,
         num_blocks=self.num_blocks * self.block_factor if self.is_hetero2 else self.num_blocks,
-        block_len=self.block_len//self.block_factor if self.is_hetero2 else self.block_len,
-        attn_backend_name= "FLASH_ATTN_VLLM_V1" if self.is_hetero2 else self.backend_name,
-        kv_cache_layout=self.kv_cache_layout)
+        block_lens=[self.block_len//self.block_factor if self.is_hetero2 else self.block_len] *2* self.num_layers,
+        attn_backend_name= "FLASH_ATTN" if self.is_hetero2 else self.backend_name,
+        kv_cache_layout=self.kv_cache_layout,
+        block_size = self.block_size//self.block_factor)
+    print(f'buke {self.num_blocks=}|{self.block_len=}|{self.block_size=}')
+    print('buke metadata:', metadata)
     ready_event = threading.Event()
     self._nixl_handshake_listener_t = threading.Thread(
         target=self._nixl_handshake_listener,
