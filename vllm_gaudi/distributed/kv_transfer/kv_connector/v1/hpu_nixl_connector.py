@@ -550,12 +550,10 @@ def add_remote_agent(self,
 
     if self.use_mla or is_kv_replicated:
         # With MLA the only difference is in the number of blocks.
-        remote_block_size = nixl_agent_meta.block_len // (
-            self.slot_size_bytes)
-        assert self.block_len == nixl_agent_meta.block_len
+        remote_block_size = nixl_agent_meta.block_size
+        assert len(self.block_lens) == len(nixl_agent_meta.block_lens)
     else:
-        remote_block_size = nixl_agent_meta.block_len // (
-            self.slot_size_bytes * tp_ratio)
+        remote_block_size = nixl_agent_meta.block_size
         if self._use_flashinfer:
             # Account for joint KV in FlashInfer.
             remote_block_size //= 2
@@ -583,23 +581,23 @@ def add_remote_agent(self,
     # Only register the remote's descriptors if current rank pulls from it.
     self.kv_caches_base_addr[
         engine_id] = nixl_agent_meta.kv_caches_base_addr
-    rank_offset = self.tp_rank % tp_ratio * nixl_agent_meta.block_len // tp_ratio \
+    rank_offset = self.tp_rank % tp_ratio * nixl_agent_meta.block_lens[0] // tp_ratio \
         if not (self.use_mla or is_kv_replicated) else 0
     # Register all remote blocks, but only the corresponding kv heads.
-    for base_addr in nixl_agent_meta.kv_caches_base_addr:
+    for kv_idx, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
         for block_id in range(nixl_agent_meta.num_blocks):
-            block_offset = block_id * nixl_agent_meta.block_len
+            block_offset = block_id * nixl_agent_meta.block_lens[kv_idx]
             # For each block, grab the heads chunk belonging to rank_i
             # of size remote_nheads // tp_ratio, which correspond to
             # self.block_len == remote_block_len//tp_ratio bytes.
             addr = base_addr + block_offset + rank_offset
             # (addr, len, device id)
-            blocks_data.append((addr, nixl_agent_meta.block_len//tp_ratio, remote_tp_rank))
+            blocks_data.append((addr, nixl_agent_meta.block_lens[kv_idx]//tp_ratio, remote_tp_rank))
     logger.debug(
         "Created %s blocks for dst engine %s with remote rank %s and "
         "local rank %s", len(blocks_data), engine_id, remote_tp_rank,
         self.tp_rank)
-    logger.debug(f'buke {self.slot_size_bytes=}|{tp_ratio=}|{self.block_len=}|{nixl_agent_meta.block_len=}|{self.tp_rank=}|{self._use_flashinfer=}')
+    logger.debug(f'buke {self.slot_size_bytes=}|{tp_ratio=}|{self.block_len=}|{nixl_agent_meta.block_lens=}|{self.tp_rank=}|{self._use_flashinfer=}')
     # Register with NIXL.
     descs = self.nixl_wrapper.get_xfer_descs(blocks_data,
                                              self.remote_nixl_memory_type)
