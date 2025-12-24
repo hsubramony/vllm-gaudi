@@ -10,7 +10,7 @@ import torch
 import functools
 from dataclasses import dataclass
 import itertools
-from typing import Optional, Callable, TypeAlias, Union
+from typing import Optional, Callable, TypeAlias, Union, Self
 from dataclasses import dataclass
 import habana_frameworks.torch as htorch
 

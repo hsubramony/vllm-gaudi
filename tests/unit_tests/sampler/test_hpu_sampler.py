@@ -12,8 +12,8 @@ from unittest.mock import patch
 
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.sampler import Sampler
 
-from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -129,7 +129,7 @@ def _create_offset_logits(batch_size: int) -> torch.tensor:
 @pytest.mark.parametrize("batch_size", [1, 32])
 def test_sampler_greedy(batch_size: int) -> None:
     logits = _create_logits(batch_size)
-    sampler = get_sampler()
+    sampler = Sampler()
     sampling_params = _create_sampling_params(temperature=0)
     sampling_metadata = _prepare_metadata(batch_size, sampling_params)
 
@@ -149,7 +149,7 @@ def test_sampler_greedy(batch_size: int) -> None:
 def test_sampler_random(batch_size: int) -> None:
     set_random_seed(SEED)
     logits = _create_logits(batch_size)
-    sampler = get_sampler()
+    sampler = Sampler()
     sampling_params = _create_sampling_params(temperature=1.0, seed=SEED)
     sampling_metadata = _prepare_metadata(batch_size, sampling_params)
 
@@ -172,7 +172,7 @@ def test_sampler_random_seeded(batch_size: int) -> None:
     # due to q[i].exponential_( generating random numbers although
     # generator is set. If init_value is set closer to 1e2 this test will fail
     logits = _create_logits(batch_size, init_value=1e-2)
-    sampler = get_sampler()
+    sampler = Sampler()
     sampling_params = _create_sampling_params(temperature=1.0, seed=SEED)
     sampling_metadata = _prepare_metadata(batch_size, sampling_params, is_seeded_random=True)
 
@@ -200,7 +200,7 @@ def test_sampler_random_seeded(batch_size: int) -> None:
 def test_sampler_top_p_top_k_min_p(batch_size: int, top_k: int, top_p: float, min_p: float) -> None:
     set_random_seed(SEED)
     logits = _create_offset_logits(batch_size)
-    sampler = get_sampler()
+    sampler = Sampler()
     sampling_params = _create_sampling_params(temperature=1.0, seed=SEED, top_k=top_k, top_p=top_p, min_p=min_p)
     sampling_metadata = _prepare_metadata(batch_size, sampling_params)
 

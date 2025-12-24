@@ -34,7 +34,6 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group, has_kv_transfer
 from vllm.forward_context import set_forward_context, DPMetadata
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (VocabParallelEmbedding)
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -43,7 +42,7 @@ from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingType
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv, is_pin_memory_available, LazyLoader)
 from vllm_gaudi.utils import (HPUCompileConfig, is_fake_hpu, async_h2d_copy)
 from vllm_gaudi.v1.attention.backends.hpu_attn import HPUAttentionMetadataV1
@@ -58,12 +57,14 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.models.interfaces import (supports_eagle3, supports_transcription)
 from vllm.model_executor.models.interfaces_base import (VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
+from vllm.transformers_utils.config import is_interleaved
 from vllm.v1.worker.utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.sample.sampler import Sampler
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from torch.nn.utils.rnn import pad_sequence
 from vllm.v1.core.sched.output import NewRequestData
@@ -313,6 +314,12 @@ def modify_model_layers(module: torch.nn.Module, suffix_list: list[str], n=1, co
             modify_model_layers(child_module, suffix_list, n, counter)
 
 
+def is_mm_optimized(model):
+    return 'Gemma3ForConditionalGeneration' in str(type(model.model)) \
+        if hasattr(model, 'model') else \
+        'Gemma3ForConditionalGeneration' in str(type(model))
+
+
 class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
 
     def __init__(self, model, vllm_config):
@@ -327,6 +334,9 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         self._rotary_prepare_cos_sin = self._get_prepare_cos_sin()
         self.unified_attn = get_config().unified_attn
         self.flatten_input = get_config().flatten_input
+        self.is_mm_optimized = is_mm_optimized(self.model)
+        self.sliding_window = vllm_config.model_config.get_sliding_window()
+        self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
 
     def _get_rotary_embedding_module(self, model: torch.nn.Module):
         """
@@ -389,36 +399,103 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         attn_metadata = custom_tuple_replace(prefill_metadata, "TrimmedAttentionMetadata", attn_bias=attn_bias)
         return attn_metadata
 
-    def _set_block_mapping(self, metadata, batch_size, device, dtype):
+    def _set_attn_bias_for_sliding_window(self, attn_metadata, batch_size, seq_len, window_size, device, dtype):
+
+        if (attn_metadata is None or not attn_metadata.is_prompt):
+            return attn_metadata
+
+        prefill_metadata = attn_metadata
+        shift = 0
+
+        if self.prefill_use_fusedsdpa and attn_metadata.block_list is not None:
+
+            context_lens_t = prefill_metadata.context_lens_tensor
+
+            block_list = attn_metadata.block_list
+            max_context_len = (block_list.size(-1) // batch_size if block_list is not None else 0)
+            max_context_len = max_context_len * self.block_size
+
+            invalid_lens_t = context_lens_t - window_size + torch.arange(seq_len, device=device) - 1
+            past_indices = torch.arange(max_context_len, device=device)
+            past_mask = ((past_indices.unsqueeze(0) > invalid_lens_t.unsqueeze(-1)) &
+                         (past_indices.unsqueeze(0) < context_lens_t.unsqueeze(-1).unsqueeze(0))).unsqueeze(1)
+
+            # Create boolean sliding window mask
+            causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=shift)
+            causal_mask = torch.triu(causal_mask, diagonal=shift - window_size + 1)
+            causal_mask = causal_mask.view(batch_size, 1, seq_len, seq_len)
+
+            # TODO: Investigate further - Removing Padding cause accuracy issue
+            # seq_lens_t = prefill_metadata.seq_lens_tensor
+            # len_mask = (torch.arange(0, seq_len, device=device, dtype=torch.int32).view(1, seq_len).lt(
+            #     seq_lens_t.unsqueeze(-1)).view(batch_size, 1, 1, seq_len))
+            # causal_mask = causal_mask.logical_and(len_mask)
+
+            mask = torch.concat((past_mask, causal_mask), dim=-1)
+            attn_bias = torch.where(mask, torch.tensor(0.0, dtype=dtype, device=device),
+                                    torch.tensor(float('-inf'), dtype=dtype, device=device))
+        else:
+            # CAUSAL MASK without removing padding (CAUSAL+sliding window)
+            # removing padding cause accuracy issue for images input
+            tensor = torch.full((batch_size, 1, seq_len, seq_len), device=device, dtype=dtype, fill_value=1)
+            mask = torch.tril(tensor, diagonal=shift)
+            mask = torch.triu(mask, diagonal=shift - window_size + 1)
+            attn_bias = torch.log(mask)
+
+        attn_metadata = prefill_metadata._replace(window_attn_bias=attn_bias)
+        return attn_metadata
+
+    def _set_block_mapping(self, metadata, batch_size, device, dtype, is_window_block=False):
+        if is_window_block:
+            block_usage = metadata.window_block_usage
+            block_groups = metadata.window_block_groups
+        else:
+            block_usage = metadata.block_usage
+            block_groups = metadata.block_groups
+
         mask = torch.arange(0, self.block_size, device=device, dtype=torch.int32).unsqueeze(0)
-        mask = mask >= metadata.block_usage.unsqueeze(-1)
+        mask = mask >= block_usage.unsqueeze(-1)
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(mask, -math.inf))
 
         if not is_fake_hpu():
-            block_mapping = torch.nn.functional.one_hot(metadata.block_groups, num_classes=batch_size)
+            block_mapping = torch.nn.functional.one_hot(block_groups, num_classes=batch_size)
         else:
             # Unfortunately one_hot on CPU
             # doesn't handle out of bounds classes so we need to convert
             # all negative values to 0 (block_mapping) or bs (block_groups)
-            block_groups = metadata.block_groups.to(torch.long)
+            block_groups = block_groups.to(torch.long)
             block_mapping = torch.nn.functional.relu(block_groups)
             block_mapping = torch.nn.functional.one_hot(block_mapping, num_classes=batch_size)
             oob_values = block_groups.lt(0)
             block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
             block_groups.masked_fill_(oob_values, batch_size)
-            metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", block_groups=block_groups)
+            if is_window_block:
+                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", window_block_groups=block_groups)
+            else:
+                metadata = custom_tuple_replace(metadata, "TrimmedAttentionMetadata", block_groups=block_groups)
         block_mapping = block_mapping.to(dtype)
-        metadata = custom_tuple_replace(metadata,
-                                        "TrimmedAttentionMetadata",
-                                        block_mapping=block_mapping,
-                                        attn_bias=attn_bias)
+        if is_window_block:
+            metadata = custom_tuple_replace(metadata,
+                                            "TrimmedAttentionMetadata",
+                                            window_block_mapping=block_mapping,
+                                            window_attn_bias=attn_bias)
+        else:
+            metadata = custom_tuple_replace(metadata,
+                                            "TrimmedAttentionMetadata",
+                                            block_mapping=block_mapping,
+                                            attn_bias=attn_bias)
         return metadata
 
     def _update_metadata(self, attn_metadata, batch_size, seq_len, device, dtype):
         if attn_metadata.is_prompt:
             attn_metadata = self._set_attn_bias(attn_metadata, batch_size, seq_len, device, dtype)
+            if self.interleaved_sliding_window:
+                attn_metadata = self._set_attn_bias_for_sliding_window(attn_metadata, batch_size, seq_len,
+                                                                       self.sliding_window, device, dtype)
         else:
             attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype)
+            if self.interleaved_sliding_window:
+                attn_metadata = self._set_block_mapping(attn_metadata, batch_size, device, dtype, True)
         return attn_metadata
 
     def forward(self, *args, **kwargs):
@@ -536,8 +613,21 @@ def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
     # input_hash(123) != input_hash(321)
     # input_hash("abc") != input_hash("cba")
     attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [
-        'attn_bias', 'seq_lens_tensor', 'context_lens_tensor', 'block_list', 'block_mapping', 'block_usage',
-        'slot_mapping', 'is_prompt', 'block_size', 'block_groups'
+        'attn_bias',
+        'seq_lens_tensor',
+        'context_lens_tensor',
+        'block_list',
+        'block_mapping',
+        'block_usage',
+        'slot_mapping',
+        'is_prompt',
+        'block_size',
+        'block_groups',
+        'window_block_list',
+        'window_block_mapping',
+        'window_block_usage',
+        'window_block_groups',
+        'window_attn_bias',
     ])
     return attention_metadata
 
@@ -570,7 +660,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.use_aux_hidden_state_outputs = False
         self.supports_mm_inputs = False
 
-        self.sampler = get_sampler()
+        self.sampler = Sampler()
 
         # NOTE(kzawora) update_env is a hack to work around VLLMKVCache in
         # hpu-extension which selects fetch_from_cache implementation based
@@ -598,6 +688,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.is_pooling_model = model_config.pooler_config is not None
 
         self.sliding_window = model_config.get_sliding_window()
+        self.interleaved_sliding_window = is_interleaved(vllm_config.model_config.hf_text_config)
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
@@ -730,9 +821,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             logger.info("Bucketing is OFF.")
         self._PAD_SLOT_ID = -1
         self._PAD_BLOCK_ID = -1
-        self._tokenizer = init_tokenizer_from_configs(model_config=vllm_config.model_config,
-                                                      scheduler_config=vllm_config.scheduler_config,
-                                                      lora_config=vllm_config.lora_config).tokenizer
+        self._tokenizer = init_tokenizer_from_configs(model_config=vllm_config.model_config)
+
+        if self.vllm_config.parallel_config.data_parallel_size > 1 and htorch.utils.internal.is_lazy(
+        ) and not self.model_config.enforce_eager:
+            from vllm import envs
+            # disable device group for dp synchronization when hpu graph is
+            # turned on since it's not captured and causes issues
+            envs.VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION = True
 
         self.logits_rounding = 1
         # High-level profiler
@@ -1395,6 +1491,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             block_bucket_size = \
                 self.bucketing_manager.find_decode_bucket(batch_size,
                                                           block_bucket_size)[2]
+            block_bucket_size += self.get_dp_padding(block_bucket_size)
+
             indices: list[Any]
             indices = [None] * block_bucket_size
             for i, bid in enumerate(block_list):
@@ -1406,6 +1504,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             block_bucket_size = \
                 self.bucketing_manager.find_decode_bucket(batch_size,
                                                           len(block_list))[2]
+            block_bucket_size += self.get_dp_padding(block_bucket_size)
 
             def padding_fn(tensor, pad_value):
                 return pad_list(tensor, block_bucket_size, itertools.repeat(pad_value))
@@ -1529,9 +1628,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             else:
                 all_batch_contents.append(new_batch_contents)
 
-        num_prefill_batches = len(all_batch_contents) if (len(all_batch_contents[0].req_ids) > 0) else 0
+        num_real_prefill_batches = 0
+        for content in all_batch_contents:
+            if len(content.req_ids) > 0:
+                num_real_prefill_batches += 1
 
-        num_pad_across_dp = self.get_dp_padding(num_prefill_batches)
+        num_pad_across_dp = self.get_dp_padding(num_real_prefill_batches)
         return all_batch_contents, num_pad_across_dp
 
     def _make_attn_bias(self, context_groups, token_groups):
@@ -1890,12 +1992,26 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                 padded_batch_size * num_tokens
             )
 
+        if self.interleaved_sliding_window and self.sliding_window > 0:
+            sliding_block_size = (self.sliding_window // self.block_size)
+            window_block_tables = [block_table[-sliding_block_size:] for block_table in block_tables_list]
+            window_block_list, window_block_groups, window_block_usage = \
+                self.get_habana_paged_attn_buffers(
+                    window_block_tables, slot_mapping.tolist(),
+                    padded_batch_size * num_tokens)
+
         # CPU<>HPU sync *should not* happen here.
         block_list_device = async_h2d_copy(block_list, device=self.device)
         block_usage_device = async_h2d_copy(block_usage, device=self.device)
         block_groups_device = async_h2d_copy(block_groups, device=self.device)
         num_decode_tokens_device = async_h2d_copy(num_decode_tokens, device=self.device)
         slot_mapping_device = async_h2d_copy(slot_mapping, device=self.device)
+        window_block_list_device = async_h2d_copy(window_block_list,
+                                                  device=self.device) if self.interleaved_sliding_window else None
+        window_block_usage_device = async_h2d_copy(window_block_usage,
+                                                   device=self.device) if self.interleaved_sliding_window else None
+        window_block_groups_device = async_h2d_copy(window_block_groups,
+                                                    device=self.device) if self.interleaved_sliding_window else None
 
         token_ids_device = async_h2d_copy(token_ids, device=self.device)
         if self.use_async_scheduling:
@@ -1936,6 +2052,9 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                    num_decode_tokens=num_decode_tokens_device,
                                    slot_mapping=slot_mapping_device,
                                    block_size=self.block_size,
+                                   window_block_list=window_block_list_device,
+                                   window_block_usage=window_block_usage_device,
+                                   window_block_groups=window_block_groups_device,
                                ),
                                spec_decode_metadata=spec_decode_metadata)
 
@@ -2271,7 +2390,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         else:
             self._check_unified_config(attn_metadata, logits_indices, warmup_mode)
         additional_kwargs = {}
-        if htorch.utils.internal.is_lazy() and not self.model_config.enforce_eager:
+        if htorch.utils.internal.is_lazy():
             use_graphs = self._use_graphs()
             additional_kwargs.update({"bypass_hpu_graphs": not use_graphs})
         else:
@@ -2293,7 +2412,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                kv_caches=kv_caches,
                                                inputs_embeds=inputs_embeds,
                                                model_mm_kwargs=model_mm_kwargs,
-                                               lora_mask=lora_mask)
+                                               lora_mask=lora_mask,
+                                               **additional_kwargs)
         # NOTE(kzawora): returning hidden_states is required in prompt logprobs
         # scenarios, as they will do logit processing on their own
         if self.use_aux_hidden_state_outputs:
@@ -2310,7 +2430,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                      f'{batch_size}_'
                                                      f'seq{seq_len}_ctx'
                                                      f'{num_blocks}')):
-            logits = self.model.compute_logits(hidden_states, None)
+            logits = self.model.compute_logits(hidden_states)
         return non_flattened_hidden_states, aux_hidden_states, \
             hidden_states, logits
 
@@ -2352,7 +2472,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             # If this is a partial request (i.e. chunked prefill),
             # then there is prompt logprob generated for each index.
             prompt_hidden_states = hidden_states[i, :num_logits]
-            logits = self.model.compute_logits(prompt_hidden_states, None)
+            logits = self.model.compute_logits(prompt_hidden_states)
 
             # Get the "target" tokens for each index. For prompt at index i,
             # the token at prompt index i+1 is the "sampled" token we want
@@ -2769,6 +2889,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             )
             return pooled_output
         # If necessary, swap decodes/prompts to have all decodes on the start
+
         ensure_decodes_first(self.input_batch)
         # Prepare prompts/decodes info
         pd_info = self._get_prompts_and_decodes(scheduler_output)
@@ -2909,7 +3030,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
             if self.is_driver_worker and self.profiler.enabled:
                 self.profiler_counter_helper.reset_prompt_seq_stats()
 
-        elif num_pad_prefill_batch_across_dp > 0:
+        if num_pad_prefill_batch_across_dp > 0:
             for idx, (req_id, prompt_len, token_ids, position_ids, attn_metadata, logits_indices,
                       logits_requests) in enumerate(zip(*shallow_tuple(dummy_prefill_input_data_batches_across_dp))):
                 htorch.core.mark_step()
@@ -3015,6 +3136,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                                                        None,
                                                                        warmup_mode=warmup_mode)
             htorch.core.mark_step()
+
         if structured_output:
             # Scheduler places cached before prompt
             logits_combined = logits_decode + logits_prompt
@@ -3368,7 +3490,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
         for batch_size in test_batch_sizes:
             dummy_hidden_states = torch.randn(batch_size, self.hidden_size, dtype=self.dtype, device=self.device)
-            dummy_logits = self.model.compute_logits(dummy_hidden_states, None)
+            dummy_logits = self.model.compute_logits(dummy_hidden_states)
 
             # Create dummy requests for this specific configuration
             dummy_req_ids = [f"warmup_req_{batch_size}_{i}" for i in range(max(1, batch_size))]
@@ -4157,7 +4279,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     last_hidden_states, hidden_states = ret_hidden_states
                 last_hidden_states = last_hidden_states.view(-1, last_hidden_states.shape[-1])
                 sample_hidden_states = last_hidden_states[last_token_indices]
-                logits = self.drafter.model.compute_logits(sample_hidden_states, None)
+                logits = self.drafter.model.compute_logits(sample_hidden_states)
                 draft_token_ids = logits.argmax(dim=-1)
                 return draft_token_ids, hidden_states
 
