@@ -369,10 +369,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.head_size = head_size
         self.scale = float(scale)
         self.matmul_qk = Matmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
+            else Matmul() # Workaround for FP8 perf issue runs op in BF16 when not using INC
         self.softmax = Softmax()
         self.matmul_av = Matmul() if not self.enable_fp8_attn \
-            else FP8Matmul()
+            else Matmul() # Workaround for FP8 perf issue runs op in BF16 when not using INC
         self.batch2block_matmul = Matmul() if not self.enable_fp8_attn \
             else FP8Matmul()
         self.block2batch_matmul = Matmul() if not self.enable_fp8_attn \
