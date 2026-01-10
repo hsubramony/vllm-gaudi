@@ -679,11 +679,13 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # hpu-extension which selects fetch_from_cache implementation based
         # on env vars... this should be fixed in the future
         self.enable_bucketing = get_config().use_bucketing
+        '''
         self.profiling_run = get_config().VLLM_PROFILE_PROMPT or \
                              get_config().VLLM_PROFILE_DECODE or \
                              get_config().VLLM_PT_PROFILE
         self.enable_bucketing = False if self.profiling_run else \
                                 self.enable_bucketing
+        '''
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.do_mark_step = envs.VLLM_HPU_FORCE_MARK_STEP
         self.skip_warmup = get_config().skip_warmup
@@ -705,6 +707,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
+        
+        # Override settings when profiling a single prefill/decode
+        # We can do such barbaric changes because we close vllm after the profiling
+        prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()
+        if prompt_profile_cfg or decode_profile_cfg:
+            self.scheduler_config.max_num_seqs = self.max_model_len
+            if prompt_profile_cfg:
+                self.scheduler_config.max_num_batched_tokens = prompt_profile_cfg[0] * prompt_profile_cfg[1]
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         # Cached outputs.
         ## universal buffer for input_ids and positions ##
@@ -814,7 +824,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         self.use_hpu_graph = not self.model_config.enforce_eager
         self.max_batch_size = self.scheduler_config.max_num_seqs
         self.max_num_seqs = self.scheduler_config.max_num_seqs
-        self.max_prefill_batch_size = with_default(get_config().VLLM_PROMPT_BS_BUCKET_MAX, 1)
+        if prompt_profile_cfg:
+            self.max_prefill_batch_size = prompt_profile_cfg[0]
+        else:
+            self.max_prefill_batch_size = with_default(get_config().VLLM_PROMPT_BS_BUCKET_MAX, 1)
+       
         self.seen_configs: set = set()
         self.max_num_batched_tokens = \
             self.scheduler_config.max_num_batched_tokens
@@ -3593,6 +3607,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         total_mem = starting_mem
         idx = 0
         num_candidates = len(buckets)
+
         captured_all = True
         for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
             if seq_len > self.max_num_tokens:
@@ -3615,6 +3630,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     prompt_cfg = (batch_size, seq_len, num_blocks)
                 else:
                     decode_cfg = (batch_size, 1, num_blocks)
+                
                 self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
             # TODO(kzawora): align_workers
             used_mem = mem_prof.consumed_device_memory
@@ -3821,7 +3837,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg):
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
-
+        
         if prompt_cfg:
             prompt_bs, prompt_query_len, prompt_num_blocks = prompt_cfg
             prompt_ctx_len = prompt_num_blocks * self.block_size
@@ -3894,10 +3910,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     def _generate_profiling(self, prompt_cfg, decode_cfg):
         steps = 3
         profiler = setup_profiler(warmup=steps - 1, active=1)
+        if prompt_cfg and prompt_cfg not in self.bucketing_manager.prompt_buckets:
+            self.bucketing_manager.prompt_buckets.insert(0, prompt_cfg)
+        elif decode_cfg and decode_cfg not in self.bucketing_manager.decode_buckets:
+            self.bucketing_manager.decode_buckets.insert(0, decode_cfg)
         torch.hpu.synchronize()
         profiler.start()
         for _ in range(steps):
-            self._execute_dummy_scenario(prompt_cfg, decode_cfg)
+            self._prepare_dummy_scenario(prompt_cfg, decode_cfg)
             torch.hpu.synchronize()
             profiler.step()
         profiler.stop()
@@ -3936,6 +3956,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
 
     @torch.inference_mode()
     def warmup_model(self) -> None:
+
         if not self.enable_bucketing:
             return
 
