@@ -1762,10 +1762,14 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         context_blocks_t: Optional[torch.tensor]
         context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if has_context else None
 
+        if not self.use_prefix_caching:
+            block_list = None
+        else:
+            block_list = context_blocks_t
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(seq_lens_tensor=query_lens,
                                                                      context_lens_tensor=context_lens,
                                                                      slot_mapping=token_slots,
-                                                                     block_list=context_blocks_t,
+                                                                     block_list=block_list,
                                                                      attn_bias=attn_bias,
                                                                      block_size=self.block_size)
         return PrefillInputData(request_ids=[req_ids],
@@ -2017,7 +2021,8 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     padded_batch_size * num_tokens)
 
         # CPU<>HPU sync *should not* happen here.
-        block_list_device = async_h2d_copy(block_list, device=self.device)
+        if block_list is not None:
+            block_list_device = async_h2d_copy(block_list, device=self.device)
         block_usage_device = async_h2d_copy(block_usage, device=self.device)
         block_groups_device = async_h2d_copy(block_groups, device=self.device)
         num_decode_tokens_device = async_h2d_copy(num_decode_tokens, device=self.device)
@@ -2061,7 +2066,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                position_ids=positions_device,
                                logits_indices=logits_indices_device,
                                attn_metadata=HPUAttentionMetadataV1.make_decode_metadata(
-                                   block_list=block_list_device,
+                                   block_list=block_list_device if block_list is not None else None,
                                    block_usage=block_usage_device,
                                    block_groups=block_groups_device,
                                    input_positions=None,
@@ -2717,7 +2722,11 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         slot_mapping = torch.arange(total_scheduled_tokens, dtype=torch.long, device="hpu:0")
         seq_lens_tensor = torch.tensor([total_scheduled_tokens], device='hpu:0', dtype=torch.int32)
         context_lens_tensor = torch.tensor([0], device='hpu:0', dtype=torch.int32)
-
+        
+        if not self.use_prefix_caching:  
+            block_list = None  
+        else:  
+            block_list = context_blocks_t
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
             seq_lens_tensor=seq_lens_tensor,
             context_lens_tensor=context_lens_tensor,
@@ -3664,6 +3673,12 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         req_id = f'{len(requests)}'
         block_ids = [block_id] * num_blocks
         sampling_params = SamplingParams(temperature=0.0)
+        # Add this check before creating the request  
+        if not self.use_prefix_caching:  
+            block_ids = []  # Empty list instead of actual block IDs
+        else:  
+            num_blocks = round_up(total_tokens, self.block_size) // self.block_size  
+            block_ids = [block_id] * num_blocks  
 
         req = NewRequestData(
             req_id=req_id,

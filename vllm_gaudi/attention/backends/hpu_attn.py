@@ -608,6 +608,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                               block_size=None,
                               k_scale=1.0,
                               v_scale=1.0):
+
         return {
             'scale': self.scale,
             'matmul_qk_op': self.matmul_qk,
@@ -615,8 +616,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             'batch2block_matmul_op': self.batch2block_matmul,
             'block2batch_matmul_op': self.block2batch_matmul,
             'fsdpa_op': self.fused_scaled_dot_product_attention,
-            'keys_fetch_func': self.k_cache.fetch_from_cache if (not self.is_prompt or not self.use_contiguous_pa) else self.k_cache.fetch_from_cache_prompt,
-            'values_fetch_func': self.v_cache.fetch_from_cache if (not self.is_prompt or not self.use_contiguous_pa) else self.v_cache.fetch_from_cache_prompt,
+            'keys_fetch_func': self.k_cache.fetch_from_cache if (not self.is_prompt or not self.use_contiguous_pa) else self.k_cache.fetch_from_cache_prompt if block_list is not None else None,
+            'values_fetch_func': self.v_cache.fetch_from_cache if (not self.is_prompt or not self.use_contiguous_pa) else self.v_cache.fetch_from_cache_prompt if block_list is not None else None,
             'softmax_op': self.softmax,
             'block_list': block_list,
             'key_cache': key_cache,
