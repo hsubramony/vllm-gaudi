@@ -675,7 +675,8 @@ def apply_fp8_linear_hpu(
     if input_scale is None:
         x_fp8, x_scale = dynamic_quant(input)
     else:
-        x_fp8 = torch.ops.hpu.cast_to_fp8_v2(input, 1.0 / input_scale, False, False, torch.float8_e4m3fn)[0]
+        scale = input_scale if input_scale == 1.0 else 1.0 / input_scale
+        x_fp8 = torch.ops.hpu.cast_to_fp8_v2(input, scale, False, False, torch.float8_e4m3fn)[0]
         x_scale = input_scale
     output = torch.ops.hpu.fp8_gemm_v2(A=x_fp8,
                                        trans_A=False,
