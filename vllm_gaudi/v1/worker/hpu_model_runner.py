@@ -381,7 +381,7 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         if (attn_metadata is None or (self.prefill_use_fusedsdpa and attn_metadata.block_list is None)
                 or not attn_metadata.is_prompt):
             return attn_metadata
-
+        logger.info("libin debug _set_attn_bias used ")
         if attn_metadata.attn_bias is not None:
             return attn_metadata
 
@@ -1762,14 +1762,10 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         context_blocks_t: Optional[torch.tensor]
         context_blocks_t = async_h2d_copy(context_blocks, dtype=torch.int32).flatten() if has_context else None
 
-        if not self.use_prefix_caching:
-            block_list = None
-        else:
-            block_list = context_blocks_t
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(seq_lens_tensor=query_lens,
                                                                      context_lens_tensor=context_lens,
                                                                      slot_mapping=token_slots,
-                                                                     block_list=block_list,
+                                                                     block_list=context_blocks_t,
                                                                      attn_bias=attn_bias,
                                                                      block_size=self.block_size)
         return PrefillInputData(request_ids=[req_ids],
@@ -2021,8 +2017,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                     padded_batch_size * num_tokens)
 
         # CPU<>HPU sync *should not* happen here.
-        if block_list is not None:
-            block_list_device = async_h2d_copy(block_list, device=self.device)
+        block_list_device = async_h2d_copy(block_list, device=self.device)
         block_usage_device = async_h2d_copy(block_usage, device=self.device)
         block_groups_device = async_h2d_copy(block_groups, device=self.device)
         num_decode_tokens_device = async_h2d_copy(num_decode_tokens, device=self.device)
@@ -2066,7 +2061,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
                                position_ids=positions_device,
                                logits_indices=logits_indices_device,
                                attn_metadata=HPUAttentionMetadataV1.make_decode_metadata(
-                                   block_list=block_list_device if block_list is not None else None,
+                                   block_list=block_list_device,
                                    block_usage=block_usage_device,
                                    block_groups=block_groups_device,
                                    input_positions=None,
@@ -2722,11 +2717,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         slot_mapping = torch.arange(total_scheduled_tokens, dtype=torch.long, device="hpu:0")
         seq_lens_tensor = torch.tensor([total_scheduled_tokens], device='hpu:0', dtype=torch.int32)
         context_lens_tensor = torch.tensor([0], device='hpu:0', dtype=torch.int32)
-        
-        if not self.use_prefix_caching:  
-            block_list = None  
-        else:  
-            block_list = context_blocks_t
+
         attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
             seq_lens_tensor=seq_lens_tensor,
             context_lens_tensor=context_lens_tensor,
@@ -3616,7 +3607,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         total_mem = starting_mem
         idx = 0
         num_candidates = len(buckets)
-
         captured_all = True
         for idx, (batch_size, seq_len, num_blocks) in enumerate(reversed(buckets)):
             if seq_len > self.max_num_tokens:
@@ -3673,12 +3663,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         req_id = f'{len(requests)}'
         block_ids = [block_id] * num_blocks
         sampling_params = SamplingParams(temperature=0.0)
-        # Add this check before creating the request  
-        if not self.use_prefix_caching:  
-            block_ids = []  # Empty list instead of actual block IDs
-        else:  
-            num_blocks = round_up(total_tokens, self.block_size) // self.block_size  
-            block_ids = [block_id] * num_blocks  
 
         req = NewRequestData(
             req_id=req_id,
@@ -3852,7 +3836,6 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
     def _prepare_dummy_scenario(self, prompt_cfg, decode_cfg):
         requests: list[NewRequestData] = []
         scheduled_tokens: dict[str, int] = {}
-        
         if prompt_cfg:
             prompt_bs, prompt_query_len, prompt_num_blocks = prompt_cfg
             prompt_ctx_len = prompt_num_blocks * self.block_size
