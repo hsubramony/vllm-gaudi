@@ -381,7 +381,6 @@ class HpuModelAdapter(torch.nn.Module, KVConnectorModelRunnerMixin):
         if (attn_metadata is None or (self.prefill_use_fusedsdpa and attn_metadata.block_list is None)
                 or not attn_metadata.is_prompt):
             return attn_metadata
-        logger.info("libin debug _set_attn_bias used ")
         if attn_metadata.attn_bias is not None:
             return attn_metadata
 
@@ -679,13 +678,7 @@ class HPUModelRunner(KVConnectorModelRunnerMixin):
         # hpu-extension which selects fetch_from_cache implementation based
         # on env vars... this should be fixed in the future
         self.enable_bucketing = get_config().use_bucketing
-        '''
-        self.profiling_run = get_config().VLLM_PROFILE_PROMPT or \
-                             get_config().VLLM_PROFILE_DECODE or \
-                             get_config().VLLM_PT_PROFILE
-        self.enable_bucketing = False if self.profiling_run else \
-                                self.enable_bucketing
-        '''
+
         self.use_contiguous_pa = get_config().use_contiguous_pa
         self.do_mark_step = envs.VLLM_HPU_FORCE_MARK_STEP
         self.skip_warmup = get_config().skip_warmup
